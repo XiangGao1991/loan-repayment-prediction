@@ -1,0 +1,1295 @@
+---
+title: "loan_prediction"
+author: "Xiang Gao"
+date: "2023-09-05"
+output: html_document
+---
+
+# Justification: In the next code block, I will install all necessary non-standard  libraries.
+```{r install libraries}
+#install labraries if they are not installed.
+if (!("dplyr" %in% installed.packages()[,"Package"])){
+install.packages("dplyr")}
+
+if (!("ggplot2" %in% installed.packages()[,"Package"])){
+install.packages("ggplot2")}
+
+if (!("tidyr" %in% installed.packages()[,"Package"])){
+install.packages("tidyr")}
+
+if (!("tidyverse" %in% installed.packages()[,"Package"])){
+install.packages("tidyverse")}
+
+if (!("tidymodels" %in% installed.packages()[,"Package"])){
+install.packages("tidymodels")}
+
+if (!("vip" %in% installed.packages()[,"Package"])){
+install.packages("vip")}
+
+if (!("xgboost" %in% installed.packages()[,"Package"])){
+install.packages("xgboost")}
+
+if (!("baguette" %in% installed.packages()[,"Package"])){
+install.packages("baguette")}
+
+if (!("randomForest" %in% installed.packages()[,"Package"])){
+install.packages("randomForest")}
+
+```
+
+# Justification: In the next code block, I will load all necessary libraries for later use.
+```{r load libraries}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(tidyverse)
+library(tidymodels)
+library(vip)
+library(xgboost)
+library(baguette)
+
+```
+
+# Justification: In the next code block, I will load the data file including historical data about home loan applications and approval or denial.
+```{r gathering data}
+#load the raw data
+historical_data <- read.csv("state_PA_actions_taken.csv")
+
+```
+
+
+# Justification: In the next code block, I will discover the data based on primary information and descriptive statistics.
+```{r discovering data with descriptive statistics}
+#the number of columns and rows
+ncol(historical_data)
+nrow(historical_data)
+summary(historical_data)
+```
+
+
+# Justification: Now, I can see that the raw data has 99 columns, 98 of which are possible features and the other one is the label. In order to reduce the complexity of the model, I need to discard some invalid columns in the next code block. Specific reasons are provided in the comments adjacent to the corresponding code.
+```{r data wrangling:discard unnecessary columns}
+feature_discard <- c()
+
+#The feature activity_year for all data is 2019, making this column meaningless for prediction.
+feature_discard <- c(feature_discard,"activity_year")
+
+#Some features indicate the area of applicant. 
+##Since census_tract is an overloaded feature which includes the information of the state and county, we will unpack it later and discard other features consequently.
+feature_discard <- c(feature_discard,"derived_msa.md")
+feature_discard <- c(feature_discard,"state_code")
+feature_discard <- c(feature_discard,"county_code")
+feature_discard <- c(feature_discard,"ffiec_msa_md_median_family_income")
+
+#Some features can be discarded since we have already extract important information from them and store it to other columns (derived_ethnicity, derived_race, derived_sex, etc.) .
+feature_discard <- c(feature_discard,"applicant_ethnicity.1")
+feature_discard <- c(feature_discard,"applicant_ethnicity.2")
+feature_discard <- c(feature_discard,"applicant_ethnicity.3")
+feature_discard <- c(feature_discard,"applicant_ethnicity.4")
+feature_discard <- c(feature_discard,"applicant_ethnicity.5")
+
+feature_discard <- c(feature_discard,"co.applicant_ethnicity.1")
+feature_discard <- c(feature_discard,"co.applicant_ethnicity.2")
+feature_discard <- c(feature_discard,"co.applicant_ethnicity.3")
+feature_discard <- c(feature_discard,"co.applicant_ethnicity.4")
+feature_discard <- c(feature_discard,"co.applicant_ethnicity.5")
+feature_discard <- c(feature_discard,"applicant_ethnicity_observed")
+feature_discard <- c(feature_discard,"co.applicant_ethnicity_observed")
+
+feature_discard <- c(feature_discard,"applicant_race.1")
+feature_discard <- c(feature_discard,"applicant_race.2")
+feature_discard <- c(feature_discard,"applicant_race.3")
+feature_discard <- c(feature_discard,"applicant_race.4")
+feature_discard <- c(feature_discard,"applicant_race.5")
+
+feature_discard <- c(feature_discard,"co.applicant_race.1")
+feature_discard <- c(feature_discard,"co.applicant_race.2")
+feature_discard <- c(feature_discard,"co.applicant_race.3")
+feature_discard <- c(feature_discard,"co.applicant_race.4")
+feature_discard <- c(feature_discard,"co.applicant_race.5")
+
+feature_discard <- c(feature_discard,"applicant_race_observed")
+feature_discard <- c(feature_discard,"co.applicant_race_observed")
+
+feature_discard <- c(feature_discard,"applicant_sex")
+feature_discard <- c(feature_discard,"applicant_sex_observed")
+
+feature_discard <- c(feature_discard,"co.applicant_sex")
+feature_discard <- c(feature_discard,"co.applicant_sex_observed")
+
+feature_discard <- c(feature_discard,"applicant_age_above_62")
+feature_discard <- c(feature_discard,"co.applicant_age_above_62")
+
+#We will also discard denial reasons since they our model will be trained by data of features instead of conclusions.
+feature_discard <- c(feature_discard,"denial_reason.1")
+feature_discard <- c(feature_discard,"denial_reason.2")
+feature_discard <- c(feature_discard,"denial_reason.3")
+feature_discard <- c(feature_discard,"denial_reason.4")
+
+```
+
+
+# Justification: In the next code block, I will group features into different parts according to the information they relates to. In the later, I will check these features carefully and determine whether to include them to train the model. Specific reasons are provided in the comments adjacent to the corresponding code.
+```{r data wrangling:group other features}
+#These features indicate the applicant's district-related information.
+feature_area <- c("census_tract","tract_population","tract_minority_population_percent","tract_to_msa_income_percentage","tract_owner_occupied_units","tract_one_to_four_family_homes","tract_median_age_of_housing_units")
+
+#These features indicate the applicant's financial institution-related information.
+feature_financial <- c("lei","purchaser_type","submission_of_application","initially_payable_to_institution")
+
+#These features indicate the applicant's loan information.
+##Some of them are categorical features.
+feature_loan_categorical <- c("derived_loan_product_type","derived_dwelling_category","conforming_loan_limit","preapproval","loan_type","loan_purpose","lien_status","reverse_mortgage","open.end_line_of_credit","business_or_commercial_purpose","hoepa_status","negative_amortization","interest_only_payment","balloon_payment","other_nonamortizing_features","construction_method","occupancy_type","manufactured_home_secured_property_type","manufactured_home_land_property_interest")
+
+##Some of them are numerical features.
+feature_loan_numerical <- c("loan_amount","loan_to_value_ratio","interest_rate","rate_spread","total_loan_costs","total_points_and_fees","origination_charges","discount_points","lender_credits","loan_term","prepayment_penalty_term","intro_rate_period","property_value","total_units","multifamily_affordable_units")
+
+#These features indicate applicant's personal info.
+feature_privacy <- c("derived_ethnicity","derived_race","derived_sex",
+                     "applicant_age","co.applicant_age","income","debt_to_income_ratio",
+                     "applicant_credit_score_type","co.applicant_credit_score_type")
+
+#These features indicate the underwriting system for application.
+feature_aus <- c("aus.1","aus.2","aus.3","aus.4","aus.5")
+
+#check if I omit any features
+setdiff(colnames(historical_data),
+        c(feature_area,
+          feature_financial,
+          feature_loan_categorical,
+          feature_loan_numerical,
+          feature_privacy,
+          feature_aus,
+          feature_discard)
+        )
+
+#I can see that the remain column action_taken is the label.
+target <- c("action_taken")
+
+```
+
+
+# Justification: In the next code block, I will explore features relating to financial institution and then deal with their missing values. In the end I will discard some features which have little impact on the prediction. Specific reasons are provided in the comments adjacent to the corresponding code.
+```{r explore data relating to financial institution}
+financial_data <- historical_data[,c(feature_financial,target)]
+
+#check the NA value
+print(sum(is.na(financial_data$lei)))
+print(sum(is.na(financial_data$purchaser_type)))
+print(sum(is.na(financial_data$submission_of_application)))
+print(sum(is.na(financial_data$initially_payable_to_institution)))
+
+#check the number of classes for each feature
+print(length(unique(financial_data$lei)))
+print(length(unique(financial_data$purchaser_type)))
+print(length(unique(financial_data$submission_of_application)))
+print(length(unique(financial_data$initially_payable_to_institution)))
+
+#each column is a categorical feature and has no NA values. Since there are more than 1000 financial institutions in our dataset, it is too computationally expensive to conduct one-hot coding for it. We need to analyze it and divide similar institutions into one group. 
+
+#explore the approval/denial ratio for each financial institution.
+financial_institution <- data.frame(lei = unique(financial_data$lei))
+
+#count the number of cases for approval and denial.
+financial_institution_approval <- financial_data |>
+  filter(action_taken == 1) |>
+  group_by(lei) |>
+  summarize(approval = n())
+
+financial_institution_denial <- financial_data |>
+  filter(action_taken == 3) |>
+  group_by(lei) |>
+  summarize(denial = n())
+
+#join two tables to count the ratio: approval/denial
+financial_institution <- left_join(financial_institution,
+                                  financial_institution_approval,by="lei")
+
+financial_institution <- left_join(financial_institution,
+                                  financial_institution_denial,by="lei")
+
+financial_institution$approval <- replace_na(financial_institution$approval, 0)
+financial_institution$denial <- replace_na(financial_institution$denial, 0)
+
+financial_institution[1:100,]
+
+#draw a scatter plot to check the approval/denial ratios for different institutions.
+ggplot(financial_institution, aes(x = approval, y = denial)) + 
+  geom_point() + 
+  geom_smooth(method = "lm") +
+  coord_fixed(ratio = 1, xlim = c(0, 15000), ylim = c(0, 15000)) +
+  ggtitle("the loan of different institution") + 
+  xlab("the loan was originated") + 
+  ylab("the loan was denied")
+
+#I can conclude that the approval/denial ratios vary from one financial institution to another. We will not discard the seeming outliers because these don't just represent a particular institution, they represent the thousands of applicants who lend there. Instead, I will divided them into three parts - Institution of high approval, medium approval, and low approval.
+
+#using Laplace smoothing to calculate the approval ratio
+financial_institution$ratio <- (financial_institution$approval +1) /(financial_institution$denial +1)
+
+summary(financial_institution$ratio)
+
+#I divided them into three parts representing low,medium, and high level of approval ratio and then conduct one-hot coding.
+q1 <- quantile(financial_institution$ratio,0.25)
+q3 <- quantile(financial_institution$ratio,0.75)
+approval_ratio_split <- function(value) {
+    approval_ratio_level = 0
+  if (value >= q3) {
+    approval_ratio_level =2
+  } else if (value >= q1 && value < q3) {
+    approval_ratio_level =1
+  } else {
+    approval_ratio_level =0
+  }
+  return(approval_ratio_level)
+}
+
+financial_institution$ratio_type <- sapply(financial_institution$ratio, 
+                                          approval_ratio_split)
+
+
+# merge approval_ratio to financial dataframe 
+financial_data <- left_join(financial_data,financial_institution[,c("lei","ratio_type")],by="lei")
+
+#process financial institution-related data for modeling
+financial_data$action_taken <- ifelse(financial_data$action_taken == 1, 1, 0)
+
+#prepare data for applying random forest algorithm
+financial_data$purchaser_type<-as.factor(financial_data$purchaser_type)
+financial_data$submission_of_application<-as.factor(financial_data$submission_of_application)
+financial_data$initially_payable_to_institution<-as.factor(financial_data$initially_payable_to_institution)
+financial_data$action_taken<-as.factor(financial_data$action_taken)
+financial_data$ratio_type<-as.factor(financial_data$ratio_type)
+
+financial_data <- select(financial_data,-c("lei"))
+
+#Now, I will finish this part by applying the random forest algorithm.
+#In order to save computational resources, we just use a fraction of the whole instances to train the model. I won't validate them since I only care the importance of features instead of the performance of the model.  
+
+#use the 10% of dataset to create training set and testing set
+split <- initial_split(financial_data[sample(nrow(financial_data), size = 0.1 * nrow(financial_data)),], prop=0.80)
+
+# Assign training instances to training_data
+training_data <- training(split)
+
+# Assign testing instances to testing_data
+testing_data <- testing(split)
+
+financial_recipe <- recipe(action_taken ~ .,
+  data = training_data) |>
+  step_dummy(all_nominal_predictors())
+
+rfModel <- rand_forest(mode = "classification",
+  engine = "randomForest",
+  mtry = 4,
+  min_n = 100)
+
+financial_workflow <- workflow() |>
+  add_model(rfModel) |>
+  add_recipe(financial_recipe)
+
+
+rfModel_fit <- financial_workflow |>
+  fit(data = training_data)
+
+# Variable importance table
+rfModel_fit |>
+  extract_fit_parsnip() |>
+  vi()
+
+# Variable importance plot
+rfModel_fit |>
+  extract_fit_parsnip() |>
+  vip()
+
+#This accuracy is acceptable.
+testPred <- augment(rfModel_fit, testing_data)
+testPred |> accuracy(action_taken, .pred_class)
+
+#Here, we can conclude that the most important features related to financial institution are initially_payable_to_institution and ratio_type. I will use them to train our predictive model and discard other features.
+historical_data <- left_join(historical_data,
+                             rename(financial_institution[,c("lei","ratio_type")],
+                                    financial_institution_ratio_type = ratio_type),
+                             by="lei")
+
+#I will keep these features for training data.
+feature_financial <- c("initially_payable_to_institution",
+                       "financial_institution_ratio_type")
+
+#I will discard these because they are not very important or more important information has already extracted from them.
+feature_discard <- c(feature_discard,c("submission_of_application",
+                                       "purchaser_type",
+                                       "lei"))
+
+```
+
+
+# Justification: In the next code block, I will explore features relating to district information and then deal with their missing values. In the end I will discard some features have little impact on the prediction. Specific reasons are provided in the comments adjacent to the corresponding code.
+```{r explore data relating to district information}
+#These features indicate the applicant's district-related information.
+area_data <- historical_data[,c(feature_area,target)]
+
+#check the NA value
+print(sum(is.na(area_data$census_tract)))
+print(sum(is.na(area_data$tract_population)))
+print(sum(is.na(area_data$tract_minority_population_percent)))
+print(sum(is.na(area_data$tract_to_msa_income_percentage)))
+print(sum(is.na(area_data$tract_owner_occupied_units)))
+print(sum(is.na(area_data$tract_one_to_four_family_homes)))
+print(sum(is.na(area_data$tract_median_age_of_housing_units)))
+
+#As I mentioned before, census_tract is an overloaded feature and it also has 1553 NA values, so let me discover it first.
+area_data[is.na(area_data$census_tract),][1:100,]
+
+#We can see that for rows where census_tract is a null value, the values in other columns are also zero, we can simply omit them when discovering the features.
+area_data <- area_data[!is.na(area_data$census_tract),]
+
+#According to the definition, the census_tract contains information of state,county and tract code.
+## As all data is from PA state, now we only care the county and tract code.
+unique(historical_data$state_code)
+
+
+#So I will unpack the census_tract feature by splitting it into just two columns, census_county_code and census_tract_code.
+area_data$census_county_code <- substr(area_data$census_tract, start = 4, stop = 6)
+area_data$census_tract_code <- substr(area_data$census_tract, start = 7, stop = 12)
+
+#Too many classes are included in the census_tract_code. Its high cardinality will make the model computationally expensive to train. So I have to discard it and only hold the county code to represent the location.
+length(unique(area_data$census_county_code))
+length(unique(area_data$census_tract_code))
+
+area_data <- select(area_data,-c("census_tract_code"))
+
+#As with financial institutions, I would draw a scatter plot to see if there are significant differences in approval/denial ratio between counties.
+area_county <- data.frame(census_county_code = unique(area_data$census_county_code))
+
+census_county_approval <- area_data |>
+  filter(action_taken == 1) |>
+  group_by(census_county_code) |>
+  summarize(approval = n())
+
+census_county_denial <- area_data |>
+  filter(action_taken == 3) |>
+  group_by(census_county_code) |>
+  summarize(denial = n())
+
+area_county <- left_join(area_county,census_county_approval
+                         ,by="census_county_code")
+
+area_county <- left_join(area_county,census_county_denial
+                         ,by="census_county_code")
+
+area_county$approval <- replace_na(area_county$approval, 0)
+area_county$denial <- replace_na(area_county$denial, 0)
+
+#draw a scatter plot to check the approval/denial ratios for different institutions.
+ggplot(area_county, aes(x = approval, y = denial)) + 
+  geom_point() + 
+  geom_smooth(method = "lm") +
+  coord_fixed(ratio = 1, xlim = c(0, 15000), ylim = c(0, 15000)) +
+  ggtitle("the loan of different counties") + 
+  xlab("the loan was originated") + 
+  ylab("the loan was denied")
+
+#I can conclude that almost all the points align closely with the trend line, which indicates minimal variation in the approval ratio across different counties. So I will discard this feature as it contributes limited to the predictive model.
+area_data <- select(area_data,-c("census_county_code"))
+area_data <- select(area_data,-c("census_tract"))
+
+
+#For the other six district-related numerical features, it seems that they might be associated with each other and may be able to be combined into fewer latent variables such as applicants' average income, family, and housing situation. I will apply PCA to find orthogonal components.
+area_data_numerical <-area_data[,c("tract_population",
+                                   "tract_minority_population_percent",
+                                   "tract_to_msa_income_percentage",
+                                   "tract_owner_occupied_units",
+                                   "tract_one_to_four_family_homes",
+                                   "tract_median_age_of_housing_units")]
+
+#scale the features
+area_data_numerical_scaled <- scale(area_data_numerical)
+area_data_numerical_scaled <- as.data.frame(area_data_numerical_scaled)
+
+# Assign training instances to training_data
+split <- initial_split(area_data_numerical_scaled, prop=0.80)
+training_data <- training(split)
+pca_result <- princomp(training_data, cor = TRUE)
+
+#leveling off point indicates the Comp.3
+summary(pca_result)
+plot(pca_result, type = "lines")
+
+
+#From the Scree plots, we can conclude that we only need to select three factors instead of six. which might align with my hypothesis, the factors of income, family and housing.I will extract the first three important factors from the complete subset and incorporate them back into the overall data for subsequent calculation.
+historical_data_PCA <- historical_data[,c("tract_population",
+                                   "tract_minority_population_percent",
+                                   "tract_to_msa_income_percentage",
+                                   "tract_owner_occupied_units",
+                                   "tract_one_to_four_family_homes",
+                                   "tract_median_age_of_housing_units")]
+
+pca_historical_result <- princomp(historical_data_PCA, cor = TRUE)
+area_pca_data <- data.frame(area_pca_1=pca_historical_result$scores[, 1],
+                            area_pca_2=pca_historical_result$scores[, 2],
+                            area_pca_3=pca_historical_result$scores[, 3])
+historical_data <- cbind(historical_data,area_pca_data)
+
+#I will use these three pca factor features and the other district-related features.
+feature_area <- c("area_pca_1",
+                  "area_pca_2",
+                  "area_pca_3")
+
+#I will discard these because they are not very important or more important information has already extracted from them.
+feature_discard <- c(feature_discard,c( "census_tract",
+                                        "tract_population",
+                                        "tract_minority_population_percent",
+                                        "tract_to_msa_income_percentage",
+                                        "tract_owner_occupied_units",
+                                        "tract_one_to_four_family_homes",
+                                        "tract_median_age_of_housing_units"))
+
+```
+
+
+# Justification: In the next code block, I will explore features relating to underwriting system information and then deal with their missing values. In the end I will discard some features have little impact on the prediction. Specific reasons are provided in the comments adjacent to the corresponding code.
+```{r explore data relating to underwriting system information}
+#These features indicate the underwriting system information for application.
+aus_data <- historical_data[,c(feature_aus,target)]
+
+#check the NA value
+print(sum(is.na(aus_data$aus.1)))
+print(sum(is.na(aus_data$aus.2)))
+print(sum(is.na(aus_data$aus.3)))
+print(sum(is.na(aus_data$aus.4)))
+print(sum(is.na(aus_data$aus.5)))
+
+#The aus.2 to aus.5 columns contain at least 95% NA values, we can just discard them. Then inspect the aus.1. I will discard these because they are not very important.
+feature_discard <- c(feature_discard,c("aus.2","aus.3", "aus.4", "aus.5"))
+
+aus_data <- historical_data[,c("aus.1","action_taken")]
+aus_data$action_taken <- ifelse(aus_data$action_taken == 1, 1, 0)
+aus_data$action_taken <- as.factor(aus_data$action_taken)
+
+#use the 10% of dataset to create training set and testing set
+split <- initial_split(aus_data[sample(nrow(aus_data), size = 0.1 * nrow(aus_data)),], prop=0.80)
+
+#Assign training instances to training_data
+training_data <- training(split)
+
+#Assign testing instances to testing_data
+testing_data <- testing(split)
+
+aus_recipe <- recipe(action_taken ~ aus.1,
+  data = training_data) |>
+  step_dummy(all_nominal_predictors())
+
+rfModel <- rand_forest(mode = "classification",
+  engine = "randomForest",
+  mtry = 1,
+  min_n = 100)
+
+aus_workflow <- workflow() |>
+  add_model(rfModel) |>
+  add_recipe(aus_recipe)
+
+rfModel_fit <- aus_workflow |>
+  fit(data = training_data)
+
+#This accuracy is acceptable. So we will keep aus.1 as a feature to train the model.
+testPred <- augment(rfModel_fit, testing_data)
+testPred |> accuracy(action_taken, .pred_class)
+
+#I will keep this feature for training data.
+feature_aus <- c("aus.1")
+
+
+```
+
+
+# Justification: In the next code block, I will explore numerical features relating to applicants loan information and then deal with their missing values. In the end I will discard some features have little impact on the prediction. Specific reasons are provided in the comments adjacent to the corresponding code.
+```{r explore numerical data relating to applicants loan information}
+#These features indicate the applicant's loan information.
+##let me first explore the numerical data
+loan_numerical_data <- historical_data[,c(feature_loan_numerical,target)]
+
+#check the NA value
+# Except loan_amount and total_units, most features have NA values, we need to explore them carefully.
+print(sum(is.na(loan_numerical_data$loan_amount))) #0
+print(sum(is.na(loan_numerical_data$loan_to_value_ratio))) #19584
+print(sum(is.na(loan_numerical_data$interest_rate))) #80311
+print(sum(is.na(loan_numerical_data$rate_spread))) #93289
+print(sum(is.na(loan_numerical_data$total_loan_costs))) #148372
+print(sum(is.na(loan_numerical_data$total_points_and_fees))) #346784
+print(sum(is.na(loan_numerical_data$origination_charges))) #149580
+print(sum(is.na(loan_numerical_data$discount_points))) #158881
+print(sum(is.na(loan_numerical_data$lender_credits))) #152852
+print(sum(is.na(loan_numerical_data$loan_term))) #3758
+print(sum(is.na(loan_numerical_data$prepayment_penalty_term))) #339150
+print(sum(is.na(loan_numerical_data$intro_rate_period))) #272337
+print(sum(is.na(loan_numerical_data$property_value))) #10399
+print(sum(is.na(loan_numerical_data$total_units))) #0
+print(sum(is.na(loan_numerical_data$multifamily_affordable_units)))#347948
+
+#From the description in CFPB's website and observation of a part of data, we can conclude that loan_to_value_ratio is approxmately equals to 100 * loan_amount/property_value. So we can replace missing data of loan_to_value_ratio with the 100 * loan_amount/property_value.
+##Similarly, we can also replace missing data of property_value with 100 *loan_amount/ loan_to_value_ratio
+head(loan_numerical_data[!is.na(loan_numerical_data$loan_to_value_ratio),c("loan_to_value_ratio","loan_amount","property_value")])
+
+#I want to convert the loan_to_value_ratio to double floating-point decimal number, however, it seems there are some values will result in NA values after the converting process.
+loan_numerical_data$loan_to_value_ratio_double <- as.double(loan_numerical_data$loan_to_value_ratio)
+
+#Some people are "Exempted" to provide/calculate their loan_to_value_ratio. Nevertheless, we will replace them with 100 * loan_amount/property_value in order to make the model more accurate and predictive.
+unique((loan_numerical_data[!is.na(loan_numerical_data$loan_to_value_ratio) & is.na(loan_numerical_data$loan_to_value_ratio_double),c("loan_to_value_ratio")]))
+
+#explore the exception for converting property_value
+loan_numerical_data$property_value_double <- as.double(loan_numerical_data$property_value)
+# As same as loan_to_value_ratio, I will replace the "Exempt" in property_value with 100 * loan_amount/ loan_to_value_ratio
+unique((loan_numerical_data[!is.na(loan_numerical_data$property_value) & is.na(loan_numerical_data$property_value_double),c("loan_to_value_ratio")]))
+
+# 9132 rows contain neither loan_to_value_ratio nor property_value while 24659 rows are both exempted in loan_to_value_ratio and property_value so that we can not replace missing data throughout that formula.
+nrow(loan_numerical_data[is.na(loan_numerical_data$loan_to_value_ratio) & is.na(loan_numerical_data$property_value),]) #9132
+nrow(loan_numerical_data[loan_numerical_data$loan_to_value_ratio=="Exempt" & loan_numerical_data$property_value=="Exempt",]) #24659
+
+#From the description, I find that total_units denote the number of individual dwelling units related to the property securing the covered loan or, in the case of an application, proposed to secure the covered loan. So I explore the relationship between total_units and property_value.
+##From the boxplot, we can conclude that except total_units>149, there is not a strong relationship between total_units and property_value. Some strong relationship may exist between property_value and other loan information related features, but they are not applicable before I address their NA values. So we can not apply Regression imputation to fill all NA values of property_value. Instead, I will apply Mean imputation for NA values in property_value (those values can not be calculated from 100 * loan_amount/loan_to_value_ratio) and then generate loan_to_value_ratio by 100 * loan_amount/property_value.
+ggplot(loan_numerical_data, aes(x=total_units, y=property_value_double)) + 
+  geom_boxplot() +
+  labs(title="Boxplot of property_value by total_units", x="total_units", y="property_value")
+
+#Fill NA values of property_value_double with loan_amount/loan_to_value_ratio_double if loan_to_value_ratio_double is not NA
+loan_numerical_data$property_value_double <- ifelse(is.na(loan_numerical_data$property_value_double) & !is.na(loan_numerical_data$loan_to_value_ratio_double),                         (loan_numerical_data$loan_amount * 100.0 )/loan_numerical_data$loan_to_value_ratio_double, loan_numerical_data$property_value_double)
+
+#calculate the mean without NA
+mean_property_value_double <- mean(loan_numerical_data$property_value_double, na.rm = TRUE)
+
+#fill NA of property_value_double with mean.
+loan_numerical_data$property_value_double <- ifelse(is.na(loan_numerical_data$property_value_double),
+             mean_property_value_double,
+             loan_numerical_data$property_value_double)
+
+#fill NA of loan_to_value_ratio_double with loan_amount/property_value_double *100
+loan_numerical_data$loan_to_value_ratio_double <- ifelse(is.na(loan_numerical_data$loan_to_value_ratio_double),
+     (100 * loan_numerical_data$loan_amount)/loan_numerical_data$property_value_double,
+     loan_numerical_data$loan_to_value_ratio_double)
+
+# Some features have too direct relationship with the target
+unique(loan_numerical_data[!is.na(loan_numerical_data$interest_rate) &
+
+##if interest_rate is not NA and not "Exempt", the action_take must be 1
+loan_numerical_data$interest_rate!="Exempt",c("action_taken")])
+
+##if rate_spread is not NA and not "Exempt", the action_take must be 1
+unique(loan_numerical_data[!is.na(loan_numerical_data$rate_spread) &
+                             loan_numerical_data$rate_spread!="Exempt",c("action_taken")])
+
+##if total_loan_costs is not NA and not "Exempt", the action_take must be 1
+unique(loan_numerical_data[!is.na(loan_numerical_data$total_loan_costs) &
+                        loan_numerical_data$total_loan_costs!="Exempt",c("action_taken")])
+
+##if origination_charges is not NA and not "Exempt", the action_take must be 1
+unique(loan_numerical_data[!is.na(loan_numerical_data$origination_charges) &
+loan_numerical_data$origination_charges!="Exempt",c("action_taken")])
+
+##if discount_points is not NA and not "Exempt", the action_take must be 1
+unique(loan_numerical_data[!is.na(loan_numerical_data$discount_points) &
+loan_numerical_data$discount_points!="Exempt",c("action_taken")])
+
+# if lender_credits is not NA and not "Exempt", the action_take must be 1
+unique(loan_numerical_data[!is.na(loan_numerical_data$lender_credits) &
+loan_numerical_data$lender_credits!="Exempt",c("action_taken")])
+
+# interest_rate, rate_spread, total_loan_costs, origination_charges, discount_points, lender_credits, these features contain more than 20% NA values. Moreover, if they have actual values instead of NA or Exempt, the loan application must be approved. I guess that these features are likely generated after the loan application results come out. If the loan is denied, then their value will be NA. Whether my guess is correct or not, their direct relationship with the target can cause significant overfitting. Therefore, I will discard them.
+feature_discard <- c(feature_discard,c("interest_rate","rate_spread", 
+                                       "total_loan_costs","origination_charges",
+                                       "discount_points","lender_credits"))
+
+# total_points_and_fees, prepayment_penalty_term, intro_rate_period, multifamily_affordable_units, these features contain more than 75% NA values, so I will discard them.
+feature_discard <- c(feature_discard,c("total_points_and_fees","prepayment_penalty_term",
+                                       "intro_rate_period",
+                                       "multifamily_affordable_units"))
+
+# convert total_units to numerical values
+total_units_quantify <- function(value) {
+  total_units_value = 0
+  if (value == "1") {
+    total_units_value = 1
+  } else if (value=="2") {
+    total_units_value = 2
+  } else if (value=="3") {
+    total_units_value = 3
+  } else if (value=="4") {
+    total_units_value = 4
+  } else if (value=="5-24") {
+    total_units_value = 15 #using median as numerical value
+  } else if (value=="25-49") {
+    total_units_value = 37  #using median as numerical value
+  } else if (value=="50-99") {
+    total_units_value = 75  #using median as numerical value
+  } else if (value=="100-149") {
+    total_units_value = 125 #using median as numerical value
+  } else if (value==">149") {
+    total_units_value = 175 #Keeping the intervals equally spaced
+  }
+  return(total_units_value)
+}
+loan_numerical_data$total_units_int <- sapply(loan_numerical_data$total_units, 
+                                              total_units_quantify)
+
+
+# explore the exception for converting loan_term
+loan_numerical_data$loan_term_int <- as.integer(loan_numerical_data$loan_term)
+# "Exempt" in the loan_term feature will be NA in generated numerical column.
+unique((loan_numerical_data[!is.na(loan_numerical_data$loan_term) & is.na(loan_numerical_data$loan_term_int),c("loan_term")]))
+
+# Since I can not find any description stating some relationship between loan_term and other features. I will explore by calculation covariance.
+cor(loan_numerical_data$loan_amount,
+    loan_numerical_data$loan_term_int, use = "complete.obs")
+cor(loan_numerical_data$loan_to_value_ratio_double,
+    loan_numerical_data$loan_term_int, use = "complete.obs")
+cor(loan_numerical_data$property_value_double,
+    loan_numerical_data$loan_term_int, use = "complete.obs")
+cor(loan_numerical_data$total_units_int,
+    loan_numerical_data$loan_term_int, use = "complete.obs")
+
+# loan_term has little to do with other features, so I will replace its NA values with the mean.
+mean_loan_term <- as.integer(mean(loan_numerical_data$loan_term_int,na.rm = TRUE))
+
+#fill NA of loan_term_int with mean.
+loan_numerical_data$loan_term_int <- ifelse(is.na(loan_numerical_data$loan_term_int),
+                                            mean_loan_term,
+                                            loan_numerical_data$loan_term_int)
+
+#Using a logic regression model to inspect the importance of the remaining 5 features
+loan_regression_data <- loan_numerical_data[,c("loan_amount","loan_to_value_ratio_double",
+                                               "property_value_double","total_units_int",
+                                               "loan_term_int","action_taken")]
+#scaling these features
+loan_regression_data$loan_amount <- scale(loan_regression_data$loan_amount)
+loan_regression_data$loan_to_value_ratio_double <- scale(loan_regression_data$loan_to_value_ratio_double)
+loan_regression_data$property_value_double <- scale(loan_regression_data$property_value_double)
+loan_regression_data$total_units_int <- scale(loan_regression_data$total_units_int)
+loan_regression_data$loan_term_int <- scale(loan_regression_data$loan_term_int)
+loan_regression_data$action_taken<-ifelse(loan_regression_data$action_taken == 1, 1, 0)
+loan_regression_data$action_taken<-as.factor(loan_regression_data$action_taken)
+
+#use the 10% of dataset to create training set and testing set
+split <- initial_split(loan_regression_data[sample(nrow(loan_regression_data), size = 0.1 * nrow(loan_regression_data)),], prop=0.80)
+
+# Assign training instances to training_data
+training_data <- training(split)
+
+# Assign testing instances to testing_data
+testing_data <- testing(split)
+
+logisticModel <- logistic_reg(mode = "classification", engine = "glm")
+logisticModel_fit <- logisticModel |>
+  fit(action_taken ~ ., data = training_data, family="binomial")
+
+#This accuracy is acceptable.
+testPred <- augment(logisticModel_fit, testing_data)
+testPred |> accuracy(action_taken, .pred_class)
+
+# Since I scaled all of these features in advance, their weights indicate their importance. The loan_to_value_ratio is the key factor, not the absolute value of the loan or property. This makes sense because the more properties you have, the more loans you can get, but the ratio will be more stable. So, I will only keep loan_to_value_ratio for model training and deal with its NA values in historical_data and discard others.
+coef(logisticModel_fit$fit)
+
+feature_discard <- c(feature_discard,c("loan_amount","property_value","total_units","loan_term"))
+
+#convert and address NA values in historical data
+historical_data$loan_to_value_ratio_double <- as.double(historical_data$loan_to_value_ratio)
+historical_data$property_value_double <- as.double(historical_data$property_value)
+
+historical_data$loan_to_value_ratio_double <- ifelse(is.na(historical_data$loan_to_value_ratio_double) &
+       !is.na(historical_data$property_value_double),
+      (100 * historical_data$loan_amount) / historical_data$property_value_double,
+      historical_data$loan_to_value_ratio_double)
+
+mean_historical_loan_to_value_ratio_double <- mean(historical_data$loan_to_value_ratio_double,na.rm=TRUE)
+historical_data$loan_to_value_ratio_double <- ifelse(is.na(historical_data$loan_to_value_ratio_double),
+       mean_historical_loan_to_value_ratio_double,
+       historical_data$loan_to_value_ratio_double)
+
+historical_data <- select(historical_data,-c("property_value_double"))
+
+#I will keep this features for training data.
+feature_loan_numerical <- c("loan_to_value_ratio_double")
+
+
+```
+
+
+# Justification: In the next code block, I will explore categorical features relating to applicants loan information and then deal with their missing values. In the end I will discard some features have little impact on the prediction. Specific reasons are provided in the comments adjacent to the corresponding code.
+```{r explore categorical data relating to applicants loan information}
+#Let me then explore the categorical data
+loan_categorical_data <- historical_data[,c(feature_loan_categorical,target)]
+
+#check the NA value
+# only feature conforming_loan_limit have 479 NA values
+print(sum(is.na(loan_categorical_data$derived_loan_product_type)))
+print(sum(is.na(loan_categorical_data$derived_dwelling_category)))
+print(sum(is.na(loan_categorical_data$conforming_loan_limit))) #479
+print(sum(is.na(loan_categorical_data$preapproval))) 
+print(sum(is.na(loan_categorical_data$loan_type)))
+print(sum(is.na(loan_categorical_data$loan_purpose)))
+print(sum(is.na(loan_categorical_data$lien_status)))
+print(sum(is.na(loan_categorical_data$reverse_mortgage)))
+print(sum(is.na(loan_categorical_data$open.end_line_of_credit)))
+print(sum(is.na(loan_categorical_data$business_or_commercial_purpose)))
+print(sum(is.na(loan_categorical_data$hoepa_status)))
+print(sum(is.na(loan_categorical_data$negative_amortization)))
+print(sum(is.na(loan_categorical_data$interest_only_payment)))
+print(sum(is.na(loan_categorical_data$balloon_payment)))
+print(sum(is.na(loan_categorical_data$other_nonamortizing_features)))
+print(sum(is.na(loan_categorical_data$construction_method)))
+print(sum(is.na(loan_categorical_data$occupancy_type)))
+print(sum(is.na(loan_categorical_data$manufactured_home_secured_property_type)))
+print(sum(is.na(loan_categorical_data$manufactured_home_land_property_interest)))
+
+
+#From the description of conforming_loan_limit in CFPB's website, I found that NA values in this feature is also a class meaning Not Applicable, so I will fill NA with "NA"
+loan_categorical_data$conforming_loan_limit <-ifelse(is.na(loan_categorical_data$conforming_loan_limit),
+         "NA",
+         loan_categorical_data$conforming_loan_limit)
+
+#These categorical features just contain only a few classes, which allow to apply random forest.
+length(unique(loan_categorical_data$derived_loan_product_type))
+length(unique(loan_categorical_data$derived_dwelling_category))
+length(unique(loan_categorical_data$conforming_loan_limit))
+length(unique(loan_categorical_data$preapproval))
+length(unique(loan_categorical_data$loan_type))
+length(unique(loan_categorical_data$loan_purpose))
+length(unique(loan_categorical_data$lien_status))
+length(unique(loan_categorical_data$reverse_mortgage))
+length(unique(loan_categorical_data$open.end_line_of_credit))
+length(unique(loan_categorical_data$business_or_commercial_purpose))
+length(unique(loan_categorical_data$hoepa_status))
+length(unique(loan_categorical_data$negative_amortization))
+length(unique(loan_categorical_data$interest_only_payment))
+length(unique(loan_categorical_data$balloon_payment))
+length(unique(loan_categorical_data$other_nonamortizing_features))
+length(unique(loan_categorical_data$construction_method))
+length(unique(loan_categorical_data$occupancy_type))
+length(unique(loan_categorical_data$manufactured_home_secured_property_type))
+length(unique(loan_categorical_data$manufactured_home_land_property_interest))
+
+#Check if the feature has too direct relationship with target, which may cause data leakage.
+##if the feature derived_loan_product_type = FSA/RHS:Subordinate Lien, all target values will be 1. But this only cover 1 instance and will not have a significant impact on the model
+loan_categorical_data |>
+group_by(derived_loan_product_type,action_taken) |>
+summarize(n = n()) 
+
+loan_categorical_data |>
+group_by(derived_dwelling_category,action_taken) |>
+summarize(n = n())
+
+loan_categorical_data |>
+group_by(conforming_loan_limit,action_taken) |>
+summarize(n = n())
+
+#if the feature preapproval = 1, all target values will be 1. But this only cover 4962 instances and will not have a significant impact on the model
+loan_categorical_data |>
+group_by(preapproval,action_taken) |>
+summarize(n = n()) 
+
+loan_categorical_data |>
+group_by(loan_type,action_taken) |>
+summarize(n = n())
+
+loan_categorical_data |>
+group_by(loan_purpose,action_taken) |>
+summarize(n = n())
+
+loan_categorical_data |>
+group_by(lien_status,action_taken) |>
+summarize(n = n())
+
+loan_categorical_data |>
+group_by(reverse_mortgage,action_taken) |>
+summarize(n = n())
+
+loan_categorical_data |>
+group_by(open.end_line_of_credit,action_taken) |>
+summarize(n = n()) 
+
+loan_categorical_data |>
+group_by(business_or_commercial_purpose,action_taken) |>
+summarize(n = n()) 
+
+#if the feature hoepa_status = 1 or 2, all target values will be 1. This involves about 260000 instances. It has too direct relationship with target. I will discard it in order to avoid overfitting.
+loan_categorical_data |>
+group_by(hoepa_status,action_taken) |>
+summarize(n = n()) 
+feature_discard <- c(feature_discard,c("hoepa_status"))
+
+loan_categorical_data |>
+group_by(negative_amortization,action_taken) |>
+summarize(n = n()) 
+
+loan_categorical_data |>
+group_by(interest_only_payment,action_taken) |>
+summarize(n = n()) 
+
+loan_categorical_data |>
+group_by(balloon_payment,action_taken) |>
+summarize(n = n()) 
+
+loan_categorical_data |>
+group_by(other_nonamortizing_features,action_taken) |>
+summarize(n = n()) 
+
+loan_categorical_data |>
+group_by(construction_method,action_taken) |>
+summarize(n = n()) 
+
+loan_categorical_data |>
+group_by(occupancy_type,action_taken) |>
+summarize(n = n()) 
+
+loan_categorical_data |>
+group_by(manufactured_home_secured_property_type,action_taken) |>
+summarize(n = n()) 
+
+loan_categorical_data |>
+group_by(manufactured_home_land_property_interest,action_taken) |>
+summarize(n = n()) 
+
+#for other non-problematic features, I will inspect their importance using random forest.
+loan_categorical_data <- select(loan_categorical_data,-c("hoepa_status"))
+loan_categorical_data$derived_loan_product_type <- as.factor(loan_categorical_data$derived_loan_product_type)
+loan_categorical_data$derived_dwelling_category <- as.factor(loan_categorical_data$derived_dwelling_category)
+loan_categorical_data$conforming_loan_limit <- as.factor(loan_categorical_data$conforming_loan_limit)
+loan_categorical_data$preapproval <- as.factor(loan_categorical_data$preapproval)
+loan_categorical_data$loan_type <- as.factor(loan_categorical_data$loan_type)
+loan_categorical_data$loan_purpose <- as.factor(loan_categorical_data$loan_purpose)
+loan_categorical_data$lien_status <- as.factor(loan_categorical_data$lien_status)
+loan_categorical_data$reverse_mortgage <- as.factor(loan_categorical_data$reverse_mortgage)
+loan_categorical_data$open.end_line_of_credit <- as.factor(loan_categorical_data$open.end_line_of_credit)
+loan_categorical_data$business_or_commercial_purpose <- as.factor(loan_categorical_data$business_or_commercial_purpose)
+loan_categorical_data$negative_amortization <- as.factor(loan_categorical_data$negative_amortization)
+loan_categorical_data$interest_only_payment <- as.factor(loan_categorical_data$interest_only_payment)
+loan_categorical_data$balloon_payment <- as.factor(loan_categorical_data$balloon_payment)
+loan_categorical_data$other_nonamortizing_features <- as.factor(loan_categorical_data$other_nonamortizing_features)
+loan_categorical_data$construction_method <- as.factor(loan_categorical_data$construction_method)
+loan_categorical_data$occupancy_type <- as.factor(loan_categorical_data$occupancy_type)
+loan_categorical_data$manufactured_home_secured_property_type <- as.factor(loan_categorical_data$manufactured_home_secured_property_type)
+loan_categorical_data$manufactured_home_land_property_interest <- as.factor(loan_categorical_data$manufactured_home_land_property_interest)
+loan_categorical_data$action_taken <- ifelse(loan_categorical_data$action_taken == 1, 1, 0)
+loan_categorical_data$action_taken <- as.factor(loan_categorical_data$action_taken)
+
+#use the 10% of dataset to create training set and testing set
+split <- initial_split(loan_categorical_data[sample(nrow(loan_categorical_data), size = 0.1 * nrow(loan_categorical_data)),], prop=0.80)
+
+#Assign training instances to training_data
+training_data <- training(split)
+
+#Assign testing instances to testing_data
+testing_data <- testing(split)
+
+loan_categorical_recipe <- recipe(action_taken ~ .,
+  data = training_data) |>
+  step_dummy(all_nominal_predictors())
+
+rfModel <- rand_forest(mode = "classification",
+  engine = "randomForest",
+  mtry = 4,
+  min_n = 100)
+
+loan_categorical_workflow <- workflow() |>
+  add_model(rfModel) |>
+  add_recipe(loan_categorical_recipe)
+
+rfModel_fit <- loan_categorical_workflow |>
+  fit(data = training_data)
+
+#the accuracy is acceptable.
+testPred <- augment(rfModel_fit, testing_data)
+testPred |> accuracy(action_taken, .pred_class)
+
+#Variable importance table
+rfModel_fit |>
+  extract_fit_parsnip() |>
+  vi()
+
+#Variable importance plot
+rfModel_fit |>
+  extract_fit_parsnip() |>
+  vip()
+
+# According to their importance, loan_purpose, open.end_line_of_credit, lien_status, and derived_loan_product_type are more important than others, I will use them to train our predictive model and discard other features.
+feature_loan_categorical<-c("loan_purpose","open.end_line_of_credit","lien_status","derived_loan_product_type")
+
+feature_discard <- c(feature_discard,c("derived_dwelling_category","conforming_loan_limit",
+                                       "preapproval","loan_type","reverse_mortgage",
+                                       "business_or_commercial_purpose",
+                                       "negative_amortization",
+                                       "interest_only_payment",
+                                       "balloon_payment","other_nonamortizing_features",
+                                       "construction_method",
+                                       "occupancy_type",
+                                       "manufactured_home_secured_property_type",
+                                       "manufactured_home_land_property_interest"))
+
+```
+
+
+# Justification: In the next code block, I will explore categorical features relating to applicants' privacy and then deal with their missing values. In the end I will discard some features have little impact on the prediction. Specific reasons are provided in the comments adjacent to the corresponding code.
+```{r explore categorical data relating to applicants privacy}
+#These features indicate applicant's personal info.
+privacy_data <- historical_data[,c(feature_privacy,target)]
+
+#check the NA values
+# the feature income and debt_to_income_ratio have NA values.
+print(sum(is.na(privacy_data$derived_ethnicity)))
+print(sum(is.na(privacy_data$derived_race)))
+print(sum(is.na(privacy_data$derived_sex))) 
+print(sum(is.na(privacy_data$applicant_age))) 
+print(sum(is.na(privacy_data$co.applicant_age)))
+print(sum(is.na(privacy_data$income))) #12470
+print(sum(is.na(privacy_data$debt_to_income_ratio))) #16927
+print(sum(is.na(privacy_data$applicant_credit_score_type)))
+print(sum(is.na(privacy_data$co.applicant_credit_score_type)))
+
+#These categorical features just contain only a few classes, which allow to apply random forest.
+length(unique(privacy_data$derived_ethnicity))
+length(unique(privacy_data$derived_race))
+length(unique(privacy_data$derived_sex))
+length(unique(privacy_data$applicant_age))
+length(unique(privacy_data$co.applicant_age))
+length(unique(privacy_data$applicant_credit_score_type))
+length(unique(privacy_data$co.applicant_credit_score_type))
+
+#From the description of debt_to_income_ratio in CFPB's website, it is the ratio of the applicant’s or borrower’s total monthly debt to the total monthly income. So I guess that debt_to_income_ratio = 100 * (loan_amount/loan_term) / (income/12)
+historical_data[1:100,c("loan_amount","income","debt_to_income_ratio","loan_term")]
+
+##but after observing the data, I found this formula does not hold. Nevertheless, I will generate a new column = 100 * (loan_amount/loan_term) / (income/12), and observe the relationship between this new column and debt_to_income_ratio.
+debt_to_income_ratio_data <- historical_data[!is.na(historical_data$loan_term) & 
+                                             !is.na(historical_data$income) & 
+                                             !is.na(historical_data$debt_to_income_ratio) &
+                                              historical_data$loan_term!="Exempt" &
+                                              historical_data$income!=0 &
+                                              historical_data$debt_to_income_ratio!="Exempt"
+                                             ,c("loan_amount","loan_term",
+                                                "income","debt_to_income_ratio")]
+
+# convert debt_to_income_ratio to numerical values
+debt_to_income_ratio_quantify <- function(value) {
+  debt_to_income_ratio_value = 0
+  if (is.na(value)){
+    debt_to_income_ratio_value = -1 #for NA
+  } else if (value == "<20%") {
+    debt_to_income_ratio_value = 10 #using median as numerical value
+  } else if (value=="20%-<30%") {
+    debt_to_income_ratio_value = 25 #using median as numerical value
+  } else if (value=="30%-<36%") {
+    debt_to_income_ratio_value = 33 #using median as numerical value
+  } else if (value=="37") {
+    debt_to_income_ratio_value = 37
+  } else if (value=="38") {
+    debt_to_income_ratio_value = 38 
+  } else if (value=="39") {
+    debt_to_income_ratio_value = 39  
+  } else if (value=="40") {
+    debt_to_income_ratio_value = 40  
+  } else if (value=="41") {
+    debt_to_income_ratio_value = 41  
+  } else if (value=="42") {
+    debt_to_income_ratio_value = 42 
+  } else if (value=="43") {
+    debt_to_income_ratio_value = 43 
+  } else if (value=="44") {
+    debt_to_income_ratio_value = 44 
+  } else if (value=="45") {
+    debt_to_income_ratio_value = 45 
+  } else if (value=="46") {
+    debt_to_income_ratio_value = 46 
+  } else if (value=="47") {
+    debt_to_income_ratio_value = 47 
+  } else if (value=="48") {
+    debt_to_income_ratio_value = 48 
+  } else if (value=="49") {
+    debt_to_income_ratio_value = 49 
+  } else if (value=="50%-60%") {
+    debt_to_income_ratio_value = 55 #using median as numerical value
+  } else if (value==">60%") {
+    debt_to_income_ratio_value = 65 #Keeping the intervals equally spaced
+  } else{
+    debt_to_income_ratio_value = -1 # for Exempt
+  }
+  return(debt_to_income_ratio_value)
+  }
+#convert debt_to_income_ratio to numerical value
+debt_to_income_ratio_data$debt_to_income_ratio_int <- sapply(debt_to_income_ratio_data$debt_to_income_ratio, 
+       debt_to_income_ratio_quantify)
+#convert loan_term to numerical values
+debt_to_income_ratio_data$loan_term <- as.integer(debt_to_income_ratio_data$loan_term)
+
+#generate new_feature = (100 * loan_amount / loan_term) / (income / 12)
+debt_to_income_ratio_data$new_feature <- (100 * debt_to_income_ratio_data$loan_amount / debt_to_income_ratio_data$loan_term) / (debt_to_income_ratio_data$income / 12)
+
+#calculate the covariance between debt_to_income_ratio and new feature.
+cor(debt_to_income_ratio_data$debt_to_income_ratio_int,debt_to_income_ratio_data$new_feature, use = "complete.obs")
+
+#their covariance indicates that there does not exist obvious relationship between them. In this case, I will apply Mean imputation to deal with NA values in income and debt_to_income_ratio.
+mean_income <- mean(privacy_data$income,na.rm = TRUE)
+privacy_data$income <- ifelse(is.na(privacy_data$income),mean_income,privacy_data$income)
+privacy_data$debt_to_income_ratio_int <- sapply(privacy_data$debt_to_income_ratio, 
+                                                debt_to_income_ratio_quantify)
+mean_debt_to_income_ratio_int <- mean(privacy_data[privacy_data$debt_to_income_ratio_int!=-1,
+                                                   c("debt_to_income_ratio_int")])
+privacy_data$debt_to_income_ratio_int <- ifelse(privacy_data$debt_to_income_ratio_int == -1,
+                                                mean_debt_to_income_ratio_int,
+                                                privacy_data$debt_to_income_ratio_int)
+
+#Use a logic regression model to inspect the importance of the these 2 features
+privacy_regression_data <- privacy_data[,c("income",
+                                                      "debt_to_income_ratio_int","action_taken")]
+#scale these features
+privacy_regression_data$income <- scale(privacy_regression_data$income)
+privacy_regression_data$debt_to_income_ratio_int <- scale(privacy_regression_data$debt_to_income_ratio_int)
+
+privacy_regression_data$action_taken<-ifelse(privacy_regression_data$action_taken == 1, 1, 0)
+privacy_regression_data$action_taken<-as.factor(privacy_regression_data$action_taken)
+
+#use the 10% of dataset to create training set and testing set
+split <- initial_split(privacy_regression_data[sample(nrow(privacy_regression_data), size = 0.1 * nrow(privacy_regression_data)),], prop=0.80)
+
+#Assign training instances to training_data
+training_data <- training(split)
+
+#Assign testing instances to testing_data
+testing_data <- testing(split)
+
+logisticModel <- logistic_reg(mode = "classification", engine = "glm")
+logisticModel_fit <- logisticModel |>
+fit(action_taken ~ ., data = training_data, family="binomial")
+
+#This accuracy is acceptable.
+testPred <- augment(logisticModel_fit, testing_data)
+testPred |> accuracy(action_taken, .pred_class)
+
+#These two features have similar importance, I will use both of them to train our predictive model.
+coef(logisticModel_fit$fit)
+
+#convert debt_to_income_ratio to numerical value in historical_data
+historical_data$debt_to_income_ratio_int <- sapply(historical_data$debt_to_income_ratio, 
+                                              debt_to_income_ratio_quantify)
+
+mean_debt_to_income_ratio_int <- mean(historical_data[historical_data$debt_to_income_ratio_int!=-1,c("debt_to_income_ratio_int")])
+historical_data$debt_to_income_ratio_int <- ifelse(historical_data$debt_to_income_ratio_int == -1,mean_debt_to_income_ratio_int,historical_data$debt_to_income_ratio_int)
+
+#fill NA of income in historical_data
+mean_income <- mean(historical_data$income,na.rm = TRUE)
+historical_data$income <- ifelse(is.na(historical_data$income),mean_income,historical_data$income)
+
+#Inspect the importance of other categorical privacy features using random forest.
+privacy_rmf_data <- privacy_data[,c("derived_ethnicity","derived_race","derived_sex",
+                                  "applicant_age","co.applicant_age",
+                                  "applicant_credit_score_type",
+                                  "co.applicant_credit_score_type","action_taken")]
+
+privacy_rmf_data$derived_ethnicity <- as.factor(privacy_rmf_data$derived_ethnicity)
+privacy_rmf_data$derived_race <- as.factor(privacy_rmf_data$derived_race)
+privacy_rmf_data$derived_sex <- as.factor(privacy_rmf_data$derived_sex)
+privacy_rmf_data$applicant_age <- as.factor(privacy_rmf_data$applicant_age)
+privacy_rmf_data$co.applicant_age <- as.factor(privacy_rmf_data$co.applicant_age)
+privacy_rmf_data$applicant_credit_score_type <- as.factor(privacy_rmf_data$applicant_credit_score_type)
+privacy_rmf_data$co.applicant_credit_score_type <- as.factor(privacy_rmf_data$co.applicant_credit_score_type)
+privacy_rmf_data$action_taken <- ifelse(privacy_rmf_data$action_taken == 1, 1, 0)
+privacy_rmf_data$action_taken <- as.factor(privacy_rmf_data$action_taken)
+
+#use the 10% of dataset to create training set and testing set
+split <- initial_split(privacy_rmf_data[sample(nrow(privacy_rmf_data), size = 0.1 * nrow(privacy_rmf_data)),], prop=0.80)
+
+#Assign training instances to training_data
+training_data <- training(split)
+
+#Assign testing instances to testing_data
+testing_data <- testing(split)
+
+privacy_recipe <- recipe(action_taken ~ .,
+  data = training_data) |>
+  # Convert categorical (nominal) features to dummy variables
+  step_dummy(all_nominal_predictors())
+
+rfModel <- rand_forest(mode = "classification",
+  engine = "randomForest",
+  mtry = 4,
+  min_n = 100)
+
+privacy_workflow <- workflow() |>
+  add_model(rfModel) |>
+  add_recipe(privacy_recipe)
+
+rfModel_fit <- privacy_workflow |>
+  fit(data = training_data)
+
+#the accuracy is acceptable.
+testPred <- augment(rfModel_fit, testing_data)
+testPred |> accuracy(action_taken, .pred_class)
+
+# Variable importance table
+rfModel_fit |>
+  extract_fit_parsnip() |>
+  vi()
+
+# Variable importance plot
+rfModel_fit |>
+  extract_fit_parsnip() |>
+  vip()
+
+#applicant_credit_score_type is the most important feature, I will use it to train our predictive model. Other features are much less important and can lead to some data ethical issues, so I will discard them.
+feature_privacy <- c("income","debt_to_income_ratio_int","applicant_credit_score_type")
+feature_discard <- c(feature_discard,c("derived_ethnicity","derived_race","derived_sex",
+                                       "applicant_age","co.applicant_age",
+                                       "co.applicant_credit_score_type",
+                                       "debt_to_income_ratio"))
+
+```
+
+
+# Justification: Since I have already extracted the most relevant features from 5 dimensions (institution,district,underwriting system,loan information, and privacy), in the next code block, I will detect their outliers and discard those rows, resulting in a dataset for modeling.
+```{r clean data by dealing with outliers}
+#We have already selected the features for training the model.
+train_feature <- c(feature_financial,feature_area,feature_aus,feature_loan_numerical,
+                   feature_loan_categorical,feature_privacy)
+
+#Among all these train_features, some are numeric so that we need to deal with their outliers.
+head(historical_data[,train_feature])
+
+#Due to a lack of domain knowledge, I was unable to discern whether certain data were outliers in district information related features because of input errors or sampling problems, or normal values that contained important information but were more special. As a result, I will only detect outliers in features relating to loan, property, and income based on common financial knowledge.
+clean_numerical_feature<-c("loan_to_value_ratio_double",
+                           "income",
+                           "debt_to_income_ratio_int")
+
+#I tried the DBSCAN to detect outliers, but it raised error:"std::bad_alloc", which is because the limitation of the computational resources of my laptop. So I will turn to  descriptive statistics.
+summary(historical_data$loan_to_value_ratio_double)
+
+#While I don't fully understand this feature, I still think that 0 and 12750000 does not make sense.
+ggplot(historical_data[historical_data$loan_to_value_ratio_double > 0 & historical_data$loan_to_value_ratio_double<12750000,], aes(x=loan_to_value_ratio_double)) + 
+  geom_boxplot() 
+
+#Apart from 0 and 12750000, there are still several errors. So I will apply traditional IQR methods to discard these error data.
+Q1 <- quantile(historical_data$loan_to_value_ratio_double, 0.25)
+Q3 <- quantile(historical_data$loan_to_value_ratio_double, 0.75)
+LOWER_BOUND <- Q1 - 1.5 * (Q3 - Q1)
+UPPER_BOUND <- Q3 + 1.5 * (Q3 - Q1)
+loan_to_value_ratio_double_outliers <- which(historical_data$loan_to_value_ratio_double<LOWER_BOUND | historical_data$loan_to_value_ratio_double>UPPER_BOUND)
+
+#this part of data is 5% of overall dataset. It has little impact on the model if discarding them.
+length(loan_to_value_ratio_double_outliers) #17785
+
+
+#similarly, negative values and 365001 are impossible.
+summary(historical_data$income)
+
+ggplot(historical_data[historical_data$income > 0 & historical_data$income<365001,], aes(x=income)) + 
+  geom_boxplot()
+
+#use IQR method to deal with these data that significantly departs from the cluster.
+q1 <- quantile(historical_data$income, 0.25)
+q3 <- quantile(historical_data$income, 0.75)
+LOWER_BOUND <- q1 - 1.5 * (q3 - q1)
+UPPER_BOUND <- q3 + 1.5 * (q3 - q1)
+
+#this part of data is 6% of overall dataset. #22152
+income_outliers <- which(historical_data$income<LOWER_BOUND | historical_data$income>UPPER_BOUND)
+
+#the data of debt_to_income_ratio seem to be more reasonable.
+summary(historical_data$debt_to_income_ratio_int)
+
+#combine them to outliers indice
+outliers <- union(income_outliers,loan_to_value_ratio_double_outliers)
+
+#create and initialize dataset for modeling
+model_data <- historical_data[-outliers,c(train_feature,target)]
+
+#factorize the categorical data.
+model_data$initially_payable_to_institution <- as.factor(model_data$initially_payable_to_institution)
+model_data$financial_institution_ratio_type <- as.factor(model_data$financial_institution_ratio_type)
+model_data$aus.1 <- as.factor(model_data$aus.1)
+model_data$loan_purpose <- as.factor(model_data$loan_purpose)
+model_data$open.end_line_of_credit <- as.factor(model_data$open.end_line_of_credit)
+model_data$lien_status <- as.factor(model_data$lien_status)
+model_data$derived_loan_product_type <- as.factor(model_data$derived_loan_product_type)
+model_data$applicant_credit_score_type <- as.factor(model_data$applicant_credit_score_type)
+model_data$action_taken <- ifelse(model_data$action_taken == 1, 1, 0)
+model_data$action_taken <- as.factor(model_data$action_taken)
+
+```
+
+
+# Justification: In the last code block, I will train 2 models with XGboosting and bagging using selected features and cleaned data and finally choose one as the final predictive model based on their predictive accuracy.
+```{r train and evaluate model}
+split <- initial_split(model_data, prop=0.70)
+
+# Assign training instances to training_data
+training_data <- training(split)
+
+# Assign testing instances to testing_data
+testing_data <- testing(split)
+
+#recipe
+recipe <- recipe(action_taken ~ .,
+  data = training_data) |>
+  # Convert categorical (nominal) features to dummy variables
+  step_dummy(all_nominal_predictors())
+
+#XGboosting model 
+model_xgboost <- boost_tree(
+  trees = 100,
+  tree_depth = 6,
+  learn_rate = 0.1,
+  loss_reduction = 0.1,
+  mtry = 6,
+  min_n = 50,
+  mode = "classification",
+  engine = "xgboost"
+) 
+
+#fit XGboosting model with train data
+xgb_fit <- workflow() |>
+  add_recipe(recipe) |>
+  add_model(model_xgboost) |>
+  fit(data = training_data) 
+
+#Add predictions and class probabilities to training and testing data
+training_xgb <- augment(xgb_fit, training_data)
+testing_xgb <- augment(xgb_fit, testing_data)
+
+#bagging modeling 
+model_bagging <- bag_tree(
+  tree_depth = 6,
+  min_n = 50,
+  mode = "classification"
+) 
+
+#fit bagging model with train data
+bagging_fit <- workflow() |>
+  add_recipe(recipe) |>
+  add_model(model_bagging) |>
+  fit(data = training_data)
+
+#Add predictions and class probabilities to training and testing data
+training_bagging <- augment(bagging_fit, training_data)
+testing_bagging <- augment(bagging_fit, testing_data)
+
+#Save scores from XGboosting and bagging models
+scores <- c(
+  metrics(training_xgb, action_taken, .pred_class)$.estimate[1],
+  metrics(testing_xgb, action_taken, .pred_class)$.estimate[1],
+  metrics(training_bagging, action_taken, .pred_class)$.estimate[1],
+  metrics(testing_bagging, action_taken, .pred_class)$.estimate[1])
+
+#Combine into dataframe
+results <- data.frame(scores = scores, models = c("XGBoosting: train", "XGBoosting: test", "Bagging: train", "Bagging: test"))
+
+#Plot results
+results |>
+  ggplot(aes(x = models, y = scores)) +
+  geom_col(aes(fill = models)) +
+  scale_fill_brewer(palette = "Paired") +
+  labs(x = "Models", y = "Accuracy", title = "Comparing models: loan prediction") +
+  theme(legend.position = "none")
+
+results[,c("models","scores")]
+
+#Comparing the accuracy of two models, I will choose the model_xgboost as my final model to predict loan repayment, since it has a higher prediction accuracy.
+binary_model <- model_xgboost
+
+```
+# Addendum: Due to constraints in domain knowledge and the computational limitations of my laptop, I streamlined certain steps in feature engineering and model selection. In future projects, I anticipate improvements through collaboration with domain experts and leveraging cloud computing services.
