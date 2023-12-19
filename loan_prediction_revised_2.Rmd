@@ -1,0 +1,355 @@
+---
+title: "loan repayment prediction"
+author: "Xiang Gao"
+date: "2023-12-18"
+output: html_document
+---
+
+
+```{r - load modules}
+# load necessary modules
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(tidyverse)
+library(tidymodels)
+library(vip)
+library(xgboost)
+library(baguette)
+library(themis)
+library(caret)
+library(pROC)
+
+```
+
+
+```{r - gather dataset}
+#load the raw data
+historical_data <- read.csv("state_PA_actions_taken.csv")
+
+```
+
+```{r - create a pipeline to process the data}
+# create a function to process the data based on Pre-completed EDA
+process <- function(df) {
+
+# factorize target
+df$action_taken<- ifelse(df$action_taken == 1, 1, 0)
+df$action_taken<- as.factor(df$action_taken)
+
+# process lei
+# calculate the number of application for each lei
+lei_all<-  historical_data |>
+           group_by(lei) |>
+           summarise(all= n())
+
+# calculate the number of positive instances for each lei
+lei_p<-  historical_data |>
+            filter(action_taken == 1)|>
+            group_by(lei) |>
+            summarise(p= n())
+
+# calculate the acceptance rate for each lei
+lei <- left_join(lei_all,lei_p,by="lei")
+lei$p <- ifelse(is.na(lei$p), 0, lei$p)
+lei$lei_acceptance_rate <- lei$p / lei$all
+
+# merge the lei_acceptance_rate to the primary data
+df <- left_join(df,lei,by="lei")
+
+# process tract demographic data
+df_pca <- df[,c("tract_population",
+                  "tract_minority_population_percent",
+                  "tract_to_msa_income_percentage",
+                  "tract_owner_occupied_units",
+                  "tract_one_to_four_family_homes",
+                  "tract_median_age_of_housing_units")]
+
+# calculate the principle components of demographic data
+pca_result <- princomp(df_pca, cor = TRUE)
+
+# choose the first 3 pcs as key features for model training
+pca_data <- data.frame(area_pca_1=pca_result$scores[, 1],
+                       area_pca_2=pca_result$scores[, 2],
+                       area_pca_3=pca_result$scores[, 3])
+
+# merge the 3 pcs to the primary data
+df <- cbind(df,pca_data)
+
+
+# exclude missing values
+no_impute_ind <- which(is.na(historical_data$loan_to_value_ratio) & is.na(historical_data$property_value))
+df<- df[-no_impute_ind,]
+
+# impute property_value
+cond_exempt <- which(df$loan_to_value_ratio=="Exempt" & df$property_value!="Exempt")
+exempt <- df[cond_exempt,c("loan_amount","property_value")]
+exempt$property_value <- as.double(exempt$property_value)
+
+# replace exempt value in loan_to_value_ratio with the median of 100 * loan_amount/property_value
+median_loan_to_value_ratio_exempt <-  as.character(median(100 * exempt$loan_amount/exempt$property_value))
+df$loan_to_value_ratio <-  ifelse(df$loan_to_value_ratio=="Exempt",median_loan_to_value_ratio_exempt,df$loan_to_value_ratio)
+
+# impute the missing value with the 100 * loan_amount/property_value
+df$property_value <- ifelse(df$property_value=="Exempt","100000",df$property_value)
+df$property_value <- ifelse(is.na(df$property_value),"100000",df$property_value)
+df$property_value <- as.double(df$property_value)
+df$loan_to_value_ratio <- ifelse(is.na(df$loan_to_value_ratio), as.character(100 * df$loan_amount/df$property_value),df$loan_to_value_ratio)
+df$loan_to_value_ratio <- as.double(df$loan_to_value_ratio)
+
+# impute missing value with the median for income
+median_income <- median(df$income,na.rm=TRUE)
+df$income <- ifelse(is.na(df$income),median_income,df$income)
+
+# impute the missing value with a new category "NA"
+df$debt_to_income_ratio <- ifelse(is.na(df$debt_to_income_ratio),"NA",df$debt_to_income_ratio)
+
+# define all features that are included in the model training
+feature <- c("initially_payable_to_institution",
+             "lei_acceptance_rate",
+             "purchaser_type",
+             "area_pca_1",
+             "area_pca_2",
+             "area_pca_3",
+             "aus.1",
+             "loan_to_value_ratio",
+             "loan_amount",
+             "derived_loan_product_type",
+             "loan_purpose",
+             "open.end_line_of_credit",
+             "lien_status",
+             "construction_method",
+             "manufactured_home_secured_property_type",
+             "interest_only_payment",
+             "derived_dwelling_category",
+             "other_nonamortizing_features",
+             "manufactured_home_land_property_interest",
+             "other_nonamortizing_features",
+             "occupancy_type",
+             "income",
+             "debt_to_income_ratio",
+             "applicant_credit_score_type",
+             "co.applicant_credit_score_type",
+             "action_taken")
+
+result <- df[,feature]
+
+return (result)
+}
+```
+
+```{r training}
+# create training and testing set
+split <- initial_split(historical_data, prop=0.70)
+training_data <- training(split)
+testing_data <- testing(split)
+
+# process the training and testing set
+training_data <- process(training_data)
+testing_data <- process(testing_data)
+
+# create a recipe
+recipe <- recipe(action_taken ~ .,
+  data = training_data) |>
+  step_naomit() |>
+  step_dummy(all_nominal_predictors())
+
+#XGboosting model - the hyperparameters are approximately optimal after fine-tuning.
+model_xgboost <- boost_tree(
+  trees = 500,           
+  tree_depth = 10,
+  learn_rate = 0.2,
+  mtry = 19,
+  min_n = 30,
+  mode = "classification",
+  engine = "xgboost"
+)
+
+#fit XGboosting model with train data
+xgb_fit <- workflow() |>
+  add_recipe(recipe) |>
+  add_model(model_xgboost) |>
+  fit(data = training_data) 
+
+#Add predictions and class probabilities to training and testing data
+testing_xgb <- augment(xgb_fit, testing_data)
+
+# create the confusion Matrix
+cm <- confusionMatrix(testing_xgb$.pred_class, testing_xgb$action_taken)
+
+# output the performance metric
+print(cm$overall['Accuracy'])
+print(cm$byClass['Precision'])
+print(cm$byClass['Recall'])
+print(cm$byClass['F1'])
+
+roc_obj <- roc(testing_xgb$action_taken,testing_xgb$.pred_1)
+plot(roc_obj, main="ROC Curve", col="#1c61b6", lwd=2)
+auc(roc_obj)
+
+```
+
+
+
+
+``` {r fine-tune}
+# create a new workflow for fine-tuning
+xgb_workflow <- workflow() |>
+  add_recipe(recipe) |>
+  add_model(model_xgboost)
+
+# fine-tune the min_n
+model_xgboost <- boost_tree(
+  trees = 100,           
+  tree_depth = 6,
+  learn_rate = 0.1,
+  mtry = 6,
+  min_n = tune(),
+  mode = "classification",
+  engine = "xgboost"
+)
+
+# hyperparameters of 1,11,21...101
+tree_grid <- crossing(
+  min_n = seq(1, 101, by = 10)
+)
+
+tune_results <- tune_grid(
+  xgb_workflow,
+  resamples = vfold_cv(training_data, v = 5), 
+  grid = tree_grid
+)
+
+result = collect_metrics(tune_results)
+result[result$.metric=="accuracy",]
+
+# fine-tune the tree_depth
+model_xgboost <- boost_tree(
+  trees = 100,           
+  tree_depth = tune(),
+  learn_rate = 0.1,
+  mtry = 6,
+  min_n = 100,
+  mode = "classification",
+  engine = "xgboost"
+)
+# hyperparameters of 1,2,3,...,10
+tree_grid <- crossing(
+  tree_depth = seq(1, 10, by = 1)
+)
+
+tune_results <- tune_grid(
+  xgb_workflow,
+  resamples = vfold_cv(training_data, v = 5), 
+  grid = tree_grid
+)
+
+result = collect_metrics(tune_results)
+result[result$.metric=="accuracy",]
+
+# fine-tune the tree-depth
+model_xgboost <- boost_tree(
+  trees = 100,           
+  tree_depth = tune(),
+  learn_rate = 0.1,
+  mtry = 6,
+  min_n = 100,
+  mode = "classification",
+  engine = "xgboost"
+)
+# hyperparameters of 1,2,3,...,10
+tree_grid <- crossing(
+  tree_depth = seq(1, 10, by = 1)
+)
+
+tune_results <- tune_grid(
+  xgb_workflow,
+  resamples = vfold_cv(training_data, v = 5), 
+  grid = tree_grid
+)
+
+result = collect_metrics(tune_results)
+result[result$.metric=="accuracy",]
+
+# fine-tune the trees
+model_xgboost <- boost_tree(
+  trees = tune(),           
+  tree_depth = 6,
+  learn_rate = 0.1,
+  mtry = 6,
+  min_n = 100,
+  mode = "classification",
+  engine = "xgboost"
+)
+
+# hyperparameters of 50,100...500
+tree_grid <- crossing(
+  trees = seq(50, 501, by = 50)
+)
+
+tune_results <- tune_grid(
+  xgb_workflow,
+  resamples = vfold_cv(training_data, v = 5), 
+  grid = tree_grid
+)
+
+result = collect_metrics(tune_results)
+result[result$.metric=="accuracy",]
+
+# fine-tune the mtry
+model_xgboost <- boost_tree(
+  trees = 300,           
+  tree_depth = 6,
+  learn_rate = 0.1,
+  mtry = tune(),
+  min_n = 100,
+  mode = "classification",
+  engine = "xgboost"
+)
+
+# hyperparameters of 1,4,7...24
+tree_grid <- crossing(
+  mtry = seq(1, 25, by = 3)
+)
+
+tune_results <- tune_grid(
+  xgb_workflow,
+  resamples = vfold_cv(training_data, v = 5), 
+  grid = tree_grid
+)
+
+result = collect_metrics(tune_results)
+result[result$.metric=="accuracy",]
+
+# fine-tune the learn_rate
+model_xgboost <- boost_tree(
+  trees = 300,           
+  tree_depth = 6,
+  learn_rate = tune(),
+  mtry = 7,
+  min_n = 100,
+  mode = "classification",
+  engine = "xgboost"
+)
+# hyperparameters of 0.01, 0.05, 0.1, 0.2, 0.5
+tree_grid <- crossing(
+  learn_rate = c(0.01, 0.1, 0.2, 0.5)
+)
+
+tune_results <- tune_grid(
+  xgb_workflow,
+  resamples = vfold_cv(training_data, v = 5), 
+  grid = tree_grid
+)
+
+result = collect_metrics(tune_results)
+result[result$.metric=="accuracy",]
+
+# Best Results of hyperparameters
+#trees: 500
+#tree_depth: 10
+#learn_rate: 0.2
+#min_n: 30
+#mtry: 19
+
+```
